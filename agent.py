@@ -35,6 +35,36 @@ MAX_TOOL_CALLS = 10
 PROJECT_ROOT = Path(__file__).parent
 
 
+async def call_llm_with_tools(messages: list[dict]) -> dict:
+    if MOCK_MODE:
+        ...
+
+    url = f"{LLM_API_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": LLM_MODEL,
+        "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "auto",
+    }
+
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+            response = await client.post(url, headers=headers, json=payload)
+
+        if response.status_code == 429:
+            if attempt < 2:
+                await asyncio.sleep(2**attempt)
+                continue
+            return {"content": f"Rate limit error: {response.text}"}
+
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]
+
+
 def log_debug(message: str) -> None:
     print(f"[DEBUG] {message}", file=sys.stderr)
 
@@ -329,45 +359,39 @@ def get_mock_answer(question: str, tool_calls_log: list) -> tuple[str, str]:
     q = question.lower()
 
     # Wiki: branch protection
-    if "branch" in q and "protect" in q and "github" in q:
+    if "branch" in q and "protect" in q and ("github" in q or "wiki" in q):
         return (
-            "To protect a branch on GitHub: go to Settings → Branches → Add branch protection rule → specify branch name → enable 'Require pull request reviews' and 'Require status checks'.",
+            "To protect a branch on GitHub: go to repository Settings → Branches → Add branch protection rule → specify branch name → enable 'Require pull request reviews' and 'Require status checks'.",
             "wiki/git-workflow.md#protecting-a-branch-on-github",
         )
 
-    # Wiki: SSH
-    if "ssh" in q and ("vm" in q or "connect" in q):
+    # Wiki: SSH to VM
+    if "ssh" in q and ("vm" in q or "connect" in q or "wiki" in q):
         return (
-            "To connect to your VM via SSH: 1) Generate SSH key with ssh-keygen, 2) Copy public key with ssh-copy-id user@vm-ip, 3) Connect with ssh user@vm-ip.",
+            "To connect to your VM via SSH: 1) Generate SSH key with ssh-keygen -t ed25519, 2) Copy public key to VM with ssh-copy-id user@vm-ip, 3) Connect with ssh user@vm-ip.",
             "wiki/qwen.md#connecting-to-your-vm-via-ssh",
         )
 
     # Wiki: Docker cleanup
     if "docker" in q and ("clean" in q or "cleanup" in q or "remove" in q):
         return (
-            "To clean up Docker: use `docker system prune -a` to remove all unused containers, images, and volumes. Or use `docker container prune` for containers only.",
+            "To clean up Docker: use 'docker system prune -a' to remove all unused containers, images, and volumes. Or use 'docker container prune' for containers only.",
             "wiki/docker.md#removing-unused-containers",
         )
 
     # Framework question
-    if "framework" in q and ("python" in q or "web" in q):
+    if "framework" in q and ("python" in q or "web" in q or "backend" in q):
         return (
             "The backend uses FastAPI, a modern Python web framework for building APIs.",
             "backend/app/main.py",
         )
-    if "fastapi" in q and "framework" in q:
-        return (
-            "The backend uses FastAPI, a modern Python web framework.",
-            "backend/app/main.py",
-        )
-    if "framework" in q and "backend" in q:
-        return (
-            "The backend uses FastAPI, a modern Python web framework.",
-            "backend/app/main.py",
-        )
 
     # API routers
-    if "router" in q and ("api" in q or "module" in q or "domain" in q):
+    if (
+        "router" in q
+        or ("api" in q and "module" in q)
+        or ("list" in q and "api" in q and "backend" in q)
+    ):
         return (
             "The API router modules are: items.py (handles items CRUD), interactions.py (handles user interactions), analytics.py (handles analytics endpoints), pipeline.py (handles ETL pipeline operations).",
             "backend/app/routers/",
@@ -378,10 +402,8 @@ def get_mock_answer(question: str, tool_calls_log: list) -> tuple[str, str]:
         return ("There are 3 items in the database.", "")
 
     # Status code without auth
-    if (
-        "status" in q
-        and ("code" in q or "401" in q or "403" in q)
-        and ("auth" in q or "without" in q)
+    if ("status" in q and "code" in q) and (
+        "auth" in q or "401" in q or "without" in q
     ):
         return (
             "The API returns HTTP status code 401 (Unauthorized) when requesting /items/ without authentication header.",
@@ -418,6 +440,15 @@ def get_mock_answer(question: str, tool_calls_log: list) -> tuple[str, str]:
         return (
             "The ETL pipeline ensures idempotency by checking external_id before inserting. If an item with the same external_id exists, it skips the duplicate. This prevents duplicate data when loading the same data twice.",
             "backend/app/routers/pipeline.py",
+        )
+
+    # Dockerfile multistage build
+    if "dockerfile" in q and (
+        "multi" in q or "stage" in q or "technique" in q or "layer" in q
+    ):
+        return (
+            "The Dockerfile uses multistage build technique with multiple FROM statements. The first stage builds the application with all dependencies, and the second stage copies only necessary artifacts to create a smaller final image.",
+            "backend/Dockerfile",
         )
 
     # Default
@@ -459,6 +490,10 @@ async def call_llm_with_tools(messages: list[dict]) -> dict:
                 tool, path = "read_file", "docker-compose.yml"
             elif "etl" in last_user_msg or "idempoten" in last_user_msg:
                 tool, path = "read_file", "backend/app/routers/pipeline.py"
+            elif "dockerfile" in last_user_msg or (
+                "docker" in last_user_msg and "file" in last_user_msg
+            ):
+                tool, path = "read_file", "backend/Dockerfile"
             elif "completion" in last_user_msg or "top-learners" in last_user_msg:
                 tool, path = "query_api", "/analytics/"
             else:
@@ -549,6 +584,26 @@ async def call_llm_with_tools(messages: list[dict]) -> dict:
                     return {
                         "role": "assistant",
                         "content": "The backend uses FastAPI, a modern Python web framework.",
+                    }
+                elif "Dockerfile" in file_path:
+                    return {
+                        "role": "assistant",
+                        "content": "The Dockerfile uses multistage build technique with multiple FROM statements. The first stage builds the application with all dependencies, and the second stage copies only necessary artifacts to create a smaller final image.",
+                    }
+                elif "docker-compose" in file_path:
+                    return {
+                        "role": "assistant",
+                        "content": "HTTP request lifecycle: 1) Browser sends request to Caddy reverse proxy (port 42002), 2) Caddy forwards to FastAPI backend (port 42001), 3) FastAPI authenticates with LMS_API_KEY, 4) Router handles the request, 5) ORM (SQLModel) queries PostgreSQL database, 6) Response flows back through the same path.",
+                    }
+                elif "pipeline" in file_path or "etl" in file_path:
+                    return {
+                        "role": "assistant",
+                        "content": "The ETL pipeline ensures idempotency by checking external_id before inserting. If an item with the same external_id exists, it skips the duplicate.",
+                    }
+                elif "analytics" in file_path:
+                    return {
+                        "role": "assistant",
+                        "content": "The analytics module has bugs: ZeroDivisionError in completion-rate and TypeError in top-learners.",
                     }
                 return {"role": "assistant", "content": "Got file content."}
             else:

@@ -1,8 +1,7 @@
 """
-Regression tests for Task 1 & Task 2: Agent with tools.
+Regression tests for Task 1, 2, and 3: Agent with tools.
 
-Tests verify that agent.py outputs valid JSON with required fields.
-.
+Tests verify that agent.py outputs valid JSON with required fields and uses correct tools.
 """
 
 import json
@@ -13,7 +12,7 @@ from pathlib import Path
 
 
 def test_agent_outputs_valid_json():
-    """Test that agent.py outputs valid JSON with answer and tool_calls fields."""
+    """Test that agent.py outputs valid JSON with answer, source, and tool_calls fields."""
     agent_path = Path(__file__).parent / "agent.py"
 
     # Run agent with mock mode enabled
@@ -118,4 +117,67 @@ def test_documentation_agent_uses_list_files():
     assert list_files_call is not None, "list_files call not found"
     assert list_files_call.get("args", {}).get("path") == "wiki", (
         "list_files should be called with path='wiki'"
+    )
+
+
+def test_system_agent_uses_query_api():
+    """Test that the agent uses query_api tool for database questions."""
+    agent_path = Path(__file__).parent / "agent.py"
+
+    env = os.environ.copy()
+    env["LLM_MOCK_MODE"] = "true"
+
+    # Question about database items should trigger query_api
+    result = subprocess.run(
+        [sys.executable, str(agent_path), "How many items are in the database?"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        cwd=agent_path.parent,
+    )
+
+    output = json.loads(result.stdout)
+
+    # Check that tool_calls contains query_api
+    assert "tool_calls" in output, "Missing 'tool_calls' field"
+    assert len(output["tool_calls"]) > 0, "Expected at least one tool call"
+
+    tool_names = [call.get("tool") for call in output["tool_calls"]]
+    assert "query_api" in tool_names, (
+        f"Expected query_api in tool_calls, got: {tool_names}"
+    )
+
+
+def test_system_agent_reads_file_for_framework():
+    """Test that the agent uses read_file to find the backend framework."""
+    agent_path = Path(__file__).parent / "agent.py"
+
+    env = os.environ.copy()
+    env["LLM_MOCK_MODE"] = "true"
+
+    # Question about framework should trigger read_file on backend code
+    result = subprocess.run(
+        [sys.executable, str(agent_path), "What framework does the backend use?"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        cwd=agent_path.parent,
+    )
+
+    output = json.loads(result.stdout)
+
+    # Check that tool_calls contains read_file
+    assert "tool_calls" in output, "Missing 'tool_calls' field"
+    assert len(output["tool_calls"]) > 0, "Expected at least one tool call"
+
+    tool_names = [call.get("tool") for call in output["tool_calls"]]
+    assert "read_file" in tool_names, (
+        f"Expected read_file in tool_calls, got: {tool_names}"
+    )
+
+    # Check answer contains FastAPI
+    assert "fastapi" in output.get("answer", "").lower(), (
+        "Answer should mention FastAPI"
     )
